@@ -8,16 +8,100 @@
 #include <cstring>
 
 #ifdef _WIN32
-#include <Windows.h>
+
 #else
 #include <dirent.h>
 #endif
 
-const unsigned int M = 1e9;
+
+struct ThreadParams
+{
+    std::wstring directory;
+    std::unordered_map<std::wstring, ULONGLONG> &pathSpaceUsage;
+    std::unordered_map<std::wstring, ULONGLONG> &fileTypeSpaceUsage;
+};
+
+
+bool hasFileExtension(const std::wstring &filePath, const std::wstring &extension)
+{
+    size_t pos = filePath.find_last_of(L".");
+    if (pos != std::wstring::npos)
+    {
+        std::wstring ext = filePath.substr(pos + 1);
+        std::wstring extLower(ext);
+        std::transform(extLower.begin(), extLower.end(), extLower.begin(), ::tolower);
+        std::wstring extensionLower(extension);
+        std::transform(extensionLower.begin(), extensionLower.end(), extensionLower.begin(), ::tolower);
+        return extLower == extensionLower;
+    }
+    return false;
+}
+// Helper function to check if a file is a video file
+bool isVideoFile(const std::wstring &filePath)
+{
+    return hasFileExtension(filePath, L"mp4") || hasFileExtension(filePath, L"avi") || hasFileExtension(filePath, L"mkv");
+}
+
+// Helper function to check if a file is an image file
+bool isImageFile(const std::wstring &filePath)
+{
+    return hasFileExtension(filePath, L"jpg") || hasFileExtension(filePath, L"png") || hasFileExtension(filePath, L"gif");
+}
+// Function to calculate space utilization for a given directory
+DWORD WINAPI calculateSpaceUtilization(LPVOID lpParam)
+{
+    ThreadParams *params = static_cast<ThreadParams *>(lpParam);
+    std::wstring directory = params->directory;
+
+    WIN32_FIND_DATAW findFileData;
+    HANDLE hFind = FindFirstFileW((directory + L"\\*").c_str(), &findFileData);
+
+    if (hFind != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            {
+                ULONGLONG fileSize = (static_cast<ULONGLONG>(findFileData.nFileSizeHigh) << (sizeof(findFileData.nFileSizeLow) * 8)) + findFileData.nFileSizeLow;
+
+                // Calculate space utilization for paths
+                std::wstring path = directory + L"\\" + findFileData.cFileName;
+                params->pathSpaceUsage[path] += fileSize;
+
+                // Calculate space utilization for file types
+                if (isVideoFile(findFileData.cFileName))
+                {
+                    params->fileTypeSpaceUsage[L"video"] += fileSize;
+                }
+                else if (isImageFile(findFileData.cFileName))
+                {
+                    params->fileTypeSpaceUsage[L"image"] += fileSize;
+                }
+                else
+                {
+                    params->fileTypeSpaceUsage[L"other"] += fileSize;
+                }
+            }
+        }
+        while (FindNextFileW(hFind, &findFileData) != 0);
+
+        FindClose(hFind);
+    }
+
+    return 0;
+}
 
 class MenuDrivenProgram
 {
 private:
+    // Structure to store file information
+    struct FileInfo
+    {
+        std::string path;
+        std::string hash;
+        uintmax_t size;
+    };
+
     std::wstring formatBytes(ULONGLONG bytes)
     {
         const wchar_t* units[] = { L"Bytes", L"KB", L"MB", L"GB", L"TB", L"PB", L"EB", L"ZB", L"YB" };
@@ -35,33 +119,7 @@ private:
         return buffer;
     }
 
-    // Helper function to check if a file has a specific extension (case-insensitive)
-    // Helper function to check if a file has a specific extension (case-insensitive)
-    bool hasFileExtension(const std::wstring &filePath, const std::wstring &extension)
-    {
-        size_t pos = filePath.find_last_of(L".");
-        if (pos != std::wstring::npos)
-        {
-            std::wstring ext = filePath.substr(pos + 1);
-            std::wstring extLower(ext);
-            std::transform(extLower.begin(), extLower.end(), extLower.begin(), ::tolower);
-            std::wstring extensionLower(extension);
-            std::transform(extensionLower.begin(), extensionLower.end(), extensionLower.begin(), ::tolower);
-            return extLower == extensionLower;
-        }
-        return false;
-    }
-    // Helper function to check if a file is a video file
-    bool isVideoFile(const std::wstring &filePath)
-    {
-        return hasFileExtension(filePath, L"mp4") || hasFileExtension(filePath, L"avi") || hasFileExtension(filePath, L"mkv");
-    }
 
-    // Helper function to check if a file is an image file
-    bool isImageFile(const std::wstring &filePath)
-    {
-        return hasFileExtension(filePath, L"jpg") || hasFileExtension(filePath, L"png") || hasFileExtension(filePath, L"gif");
-    }
     void IdentifyLargeFiles(const std::wstring &dirPath, uintmax_t thresholdSize)
     {
         WIN32_FIND_DATAW findData;
@@ -124,13 +182,6 @@ private:
         return hashResult;
     }
 
-    // Structure to store file information
-    struct FileInfo
-    {
-        std::string path;
-        std::string hash;
-        uintmax_t size;
-    };
 
     void processDirectory(const std::wstring& currentPath, const std::vector<std::wstring>& userExtensions, std::unordered_map<std::wstring, ULONGLONG>& fileTypeSpaceUsage)
     {
@@ -139,21 +190,28 @@ private:
         WIN32_FIND_DATAW findFileData;
         HANDLE hFind = FindFirstFileW(path.c_str(), &findFileData);
 
-        if (hFind != INVALID_HANDLE_VALUE) {
-            do {
-                if (findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                    if (wcscmp(findFileData.cFileName, L".") != 0 && wcscmp(findFileData.cFileName, L"..") != 0) {
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if (findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                {
+                    if (wcscmp(findFileData.cFileName, L".") != 0 && wcscmp(findFileData.cFileName, L"..") != 0)
+                    {
                         std::wstring subPath = currentPath + L"\\" + findFileData.cFileName;
                         processDirectory(subPath, userExtensions, fileTypeSpaceUsage);
                     }
                 }
-                else {
+                else
+                {
                     ULONGLONG fileSize = (static_cast<ULONGLONG>(findFileData.nFileSizeHigh) << (sizeof(findFileData.nFileSizeLow) * 8)) + findFileData.nFileSizeLow;
 
                     // Calculate space utilization for file types
                     bool isFileTypeIncluded = false;
-                    for (const auto& ext : userExtensions) {
-                        if (hasFileExtension(findFileData.cFileName, ext)) {
+                    for (const auto& ext : userExtensions)
+                    {
+                        if (hasFileExtension(findFileData.cFileName, ext))
+                        {
                             fileTypeSpaceUsage[currentPath] += fileSize;
                             isFileTypeIncluded = true;
                             break;
@@ -161,11 +219,13 @@ private:
                     }
 
                     // If the file doesn't match any specified extensions, categorize it as "other"
-                    if (!isFileTypeIncluded) {
+                    if (!isFileTypeIncluded)
+                    {
                         fileTypeSpaceUsage[currentPath] += fileSize;
                     }
                 }
-            } while (FindNextFileW(hFind, &findFileData) != 0);
+            }
+            while (FindNextFileW(hFind, &findFileData) != 0);
 
             FindClose(hFind);
         }
@@ -230,6 +290,7 @@ private:
 #endif
     }
 
+
 public:
     void displayMenu()
     {
@@ -241,6 +302,7 @@ public:
         std::cout<<"5. Identify large files\n";
         std::cout<<"6. Provide the capability to scan specific file types\n";
         std::cout<<"7. Allow users to delete files of specific types\n";
+
     }
     void processChoice(int choice)
     {
@@ -263,6 +325,9 @@ public:
             break;
         case 6:
             option6();
+            break;
+        case 7:
+            option7();
             break;
         case 0:
             std::cout << "Exiting the program. Goodbye!\n";
@@ -336,73 +401,43 @@ public:
 
 
 
-
-
-
-
-
-
-
-
     void option3()
     {
         const std::wstring rootPath = L"D:\\"; // Change this to your desired root directory
 
-        std::unordered_map<std::wstring, ULONGLONG>
-        driveSpaceUsage;
         std::unordered_map<std::wstring, ULONGLONG> pathSpaceUsage;
         std::unordered_map<std::wstring, ULONGLONG> fileTypeSpaceUsage;
 
-        std::vector<std::wstring> videoExtensions = {L"mp4", L"avi", L"mkv"};
-        std::vector<std::wstring> imageExtensions = {L"jpg", L"png", L"gif"};
-
+        // Get the list of subdirectories in the root path
         WIN32_FIND_DATAW findFileData;
-        HANDLE hFind = FindFirstFileW((rootPath + L"\\*").c_str(), &findFileData); // Use FindFirstFileW
+        HANDLE hFind = FindFirstFileW((rootPath + L"\\*").c_str(), &findFileData);
 
         if (hFind != INVALID_HANDLE_VALUE)
         {
             do
             {
-                if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                if ((findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && (wcscmp(findFileData.cFileName, L".") != 0) && (wcscmp(findFileData.cFileName, L"..") != 0))
                 {
-                    ULONGLONG fileSize = (static_cast<ULONGLONG>(findFileData.nFileSizeHigh) << (sizeof(findFileData.nFileSizeLow) * 8)) + findFileData.nFileSizeLow;
-                    // Calculate space utilization for drives
-                    std::wstring drive = rootPath.substr(0, rootPath.find_first_of(L"\\"));
-                    driveSpaceUsage[drive] += fileSize;
+                    std::wstring subdirectory = rootPath + L"\\" + findFileData.cFileName;
 
-                    // Calculate space utilization for paths
-                    std::wstring path = rootPath + L"\\" + findFileData.cFileName;
-                    pathSpaceUsage[path] += fileSize;
-
-                    // Calculate space utilization for file types
-                    if (isVideoFile(findFileData.cFileName))
+                    // Create a new thread to process each subdirectory
+                    ThreadParams params = {subdirectory, pathSpaceUsage, fileTypeSpaceUsage};
+                    HANDLE hThread = CreateThread(NULL, 0, calculateSpaceUtilization, &params, 0, NULL);
+                    if (hThread)
                     {
-                        fileTypeSpaceUsage[L"video"] += fileSize;
-                    }
-                    else if (isImageFile(findFileData.cFileName))
-                    {
-                        fileTypeSpaceUsage[L"image"] += fileSize;
-                    }
-                    else
-                    {
-                        fileTypeSpaceUsage[L"other"] += fileSize;
+                        // Wait for the thread to finish before proceeding to the next iteration
+                        WaitForSingleObject(hThread, INFINITE);
+                        CloseHandle(hThread);
                     }
                 }
             }
-            while (FindNextFileW(hFind, &findFileData) != 0);   // Use FindNextFileW
+            while (FindNextFileW(hFind, &findFileData) != 0);
 
             FindClose(hFind);
         }
 
-        // Display space utilization breakdown for drives
-        std::wcout << "Space Utilization Breakdown (Based on Drives):" << std::endl;
-        for (const auto &entry : driveSpaceUsage)
-        {
-            std::wcout << "Drive " << entry.first << ": " << entry.second << " bytes" << std::endl;
-        }
-
         // Display space utilization breakdown for paths
-        std::wcout << "\nSpace Utilization Breakdown (Based on Paths):" << std::endl;
+        std::wcout << "Space Utilization Breakdown (Based on Paths):" << std::endl;
         for (const auto &entry : pathSpaceUsage)
         {
             std::wcout << "Path " << entry.first << ": " << entry.second << " bytes" << std::endl;
@@ -418,9 +453,6 @@ public:
 
 
     }
-
-
-
 
 
     void option4()
@@ -461,7 +493,7 @@ public:
                 for (const auto &fileInfo : group)
                 {
                     std::cout << "File Path: " << fileInfo.path << std::endl;
-                    std::cout << "File Size: " << fileInfo.size << " bytes" << std::endl;
+                    std::wcout << "File Size: " << formatBytes(fileInfo.size) << " bytes" << std::endl;
                     std::cout << "File Hash: " << fileInfo.hash << std::endl;
                 }
                 std::cout << std::endl;
@@ -477,7 +509,8 @@ public:
         IdentifyLargeFiles(path, thresholdSize);
     }
 
-    void option6() {
+    void option6()
+    {
         const std::wstring rootPath = L"D://"; // Change this to your desired root directory
 
         std::unordered_map<std::wstring, ULONGLONG> fileTypeSpaceUsage;
@@ -494,7 +527,8 @@ public:
         // Split the user input into individual file extensions
         std::vector<std::wstring> userExtensions;
         size_t pos = 0;
-        while ((pos = userInput.find(L' ')) != std::wstring::npos) {
+        while ((pos = userInput.find(L' ')) != std::wstring::npos)
+        {
             std::wstring ext = userInput.substr(0, pos);
             userExtensions.push_back(ext);
             userInput.erase(0, pos + 1);
@@ -506,8 +540,65 @@ public:
 
         // Display space utilization breakdown for specified file types
         std::wcout << "\nSpace Utilization Breakdown:" << std::endl;
-        for (const auto& entry : fileTypeSpaceUsage) {
+        for (const auto& entry : fileTypeSpaceUsage)
+        {
             std::wcout << entry.first << L": " << formatBytes(entry.second) << std::endl;
+        }
+    }
+
+    void option7()
+    {
+        const std::wstring rootPath = L"D:\\Sample"; // Change this to your desired root directory
+
+        std::vector<std::wstring> fileExtensionsToDelete;
+        std::wstring userInput;
+        std::wcin.ignore(); // Clear the input stream
+
+        std::cout << "Enter file extensions to delete (separated by spaces, e.g., 'mp4 jpg avi'): ";
+        std::getline(std::wcin, userInput);
+
+        // Parse the user input and store the file extensions in the vector
+        size_t startPos = 0;
+        size_t endPos = 0;
+        while ((endPos = userInput.find(L' ', startPos)) != std::wstring::npos)
+        {
+            fileExtensionsToDelete.push_back(userInput.substr(startPos, endPos - startPos));
+            startPos = endPos + 1;
+        }
+        fileExtensionsToDelete.push_back(userInput.substr(startPos)); // Add the last extension
+
+        WIN32_FIND_DATAW findFileData;
+        HANDLE hFind = FindFirstFileW((rootPath + L"\\*").c_str(), &findFileData);
+
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                {
+                    std::wstring filePath = rootPath + L"\\" + findFileData.cFileName;
+
+                    // Check if the file has any of the specified extensions and delete if matched
+                    for (const auto& extension : fileExtensionsToDelete)
+                    {
+                        if (hasFileExtension(findFileData.cFileName, extension))
+                        {
+                            if (DeleteFileW(filePath.c_str()))
+                            {
+                                std::wcout << "Deleted: " << filePath << std::endl;
+                            }
+                            else
+                            {
+                                std::wcout << "Failed to delete: " << filePath << std::endl;
+                            }
+                            break; // Move to the next file after deleting one matching extension
+                        }
+                    }
+                }
+            }
+            while (FindNextFileW(hFind, &findFileData) != 0);
+
+            FindClose(hFind);
         }
     }
 
@@ -515,22 +606,21 @@ public:
 
 };
 
-
-
-
 int main()
 {
+
     MenuDrivenProgram program;
     int choice;
 
     do
     {
         program.displayMenu();
-        std::cout << "Enter your choice (1-6, 0 to exit): ";
+        std::cout << "Enter your choice (1-7, 0 to exit): ";
         std::cin >> choice;
         program.processChoice(choice);
     }
     while (choice != 0);
 
     return 0;
+
 }
